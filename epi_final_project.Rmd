@@ -1,0 +1,644 @@
+---
+title: "Chain Binomial COVID Changepoints"
+author: "Andre Ehrlich"
+date: "25/3/2023"
+output:
+  pdf_document: default
+  html_document: default
+---
+  
+```{r setup, include=FALSE}
+library(R2WinBUGS)
+library(coda)
+library(outbreaks)
+library(BRugs)
+library(incidence)
+library(bayesplot)
+library(mcmcplots)
+
+
+library(zoo)
+library(TTR)
+library(data.table)
+library(lubridate)
+library(ggplot2)
+
+knitr::opts_chunk$set(cache = TRUE, echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+# Overview of Analysis
+Each student will analyse the COVID-19 case data for the period 1 Sep 2020 – 20 June 2021 for 3 European countries.
+## A) Chain binomial model 
+- we saw in the practical, applied to the Shanghai influenza data. 
+- Note that the COVID data are typically the number of new cases and not the total number of cases (active set).
+## B) Peicewise constant with 1 change point 
+- Fit a more realistic model where the infection rate (and therefore also Rt) is piece wise constant with 1 change point that you select.
+## C) Extend the model to multiple changepoints.
+## D) Estimate change-point 
+- Fit the model with 1 changepoint by estimating the time point of change. 
+- The Stagnant example could be useful for this task.
+## E) Estimate multiple unknown changepoints (Optional) 
+- Try a combination of © and (d) fitting a model with multiple unknown change points.
+
+
+```{r}
+# 
+# # WHO COVID GLOBAL DATA
+# who_data <- read.table("~/aueb/Semester 2A/Epidemic Models (Demiris)/WHO-COVID-19-global-data.csv", header = T, sep = ",")
+# 
+# who_data$Date_reported <- as.Date(who_data$Date_reported)
+# 
+# # Starting Population for selected countries
+# # population <- data.frame("country_code"=c(), "pop"=c())
+# # population <- rbind(population, c("CZ", 10708981))
+# # population <- rbind(population, c("UK", 12))
+# # population <- rbind(population, c("BG", 3))
+# # colnames(population) <- c("country_code", "pop")
+# # population
+# 
+# ccountry <- "CZ"
+# # country_data <- who_data[who_data$Country_code == ccountry,]
+# # country_data
+# n_pop <- 10708981#population[population$country_code == ccountry]
+# n_pop#
+# 
+# 
+# who_data_subset <- who_data[
+#   which(who_data$Country_code == ccountry & who_data$Date_reported >= start_date & who_data$Date_reported <= stop_date),
+# ]
+# who_data_subset
+# 
+# plot(who_data_subset$Date_reported, who_data_subset$New_cases, type="l")
+# # This Data has some strange periodicity likely due to uneven case reporting
+# # WMA ??
+# 
+# # Reported Cases each day between start and stop date.
+# new_cases <- who_data_subset$New_cases
+# n_obs <- length(new_cases)
+# 
+# # Deterministic Assumption: After 8 days of infection, subject is removed
+# avg_infectious_period <- 8
+# new_removals <- c(rep(0, avg_infectious_period), new_cases)
+# new_removals <- new_removals[0:n_obs]
+# 
+# # Modify data into a form suitable for BUGS
+# data <- list("n_obs", "n_pop", "new_cases", "new_removals")
+```
+
+# ECDC Data 
+```{r ecdc_data, echo = TRUE}
+
+# Time period 
+start_date <- as.Date("2020-09-01", format = "%Y-%m-%d" ) 
+stop_date <- as.Date("2021-06-20", format = "%Y-%m-%d")
+
+# Deterministic Assumption: After 8 days of infection, subject is removed
+avg_infectious_period <- 8
+
+# smoothing 
+x_day_moving_average <- 7
+
+# Load Data 
+ecdc <- read.table("~/aueb/Semester 2A/Epidemic Models (Demiris)/ecdc_covid_data.csv", header = T, sep = ",")
+ecdc$dateRep <- as.Date(ecdc$dateRep, format="%d/%m/%Y")
+ecdc <- setDT(ecdc)
+```
+
+
+```{r, country_data}
+
+prepare_country_data <- function(ccountry, changepoints){
+  
+  # ccountry = 'LU'
+  # changepoints = my_changepoints$LU
+  
+  # Select country
+  ecdc_subset <- ecdc[geoId == ccountry]
+  
+  # Chronological order 
+  ecdc_subset <- ecdc_subset[order(dateRep)]
+  
+  #### MA 
+  # interpolate na's 
+  ecdc_subset$cases_narm = na.approx(ecdc_subset$cases)
+  # 7-day average, round to integer
+  ecdc_subset$cases_ma <- round(WMA(ecdc_subset$cases_narm, n=7))
+  
+  # Time Period cutoff 
+  ecdc_subset <- ecdc_subset[dateRep >= start_date & dateRep <= stop_date, ]
+  
+  
+  # file.path(getwd(), "cz_cases.png")
+  {
+    plot_path <- file.path(getwd(), paste0(ccountry, "_cases"))
+    # png(file=plot_path, width=1000, height=600)
+    par(mfrow=c(1,1))
+    
+    ggplot() + 
+      # Time Series 
+      geom_line(data=ecdc_subset, mapping=aes(x=as.Date(dateRep), y=cases,  color = "Reported")) +
+      geom_line(data=ecdc_subset, mapping=aes(as.Date(dateRep), cases_ma, color="7DMA")) +
+      # geom_line(data=ecdc_subset, mapping=aes(y=cases,  color = "Reported")) + 
+      # geom_line(data=ecdc_subset, mapping=aes(y=cases_ma, color="7DMA")) +
+
+      scale_color_manual(name = "Cases", values = c("Reported" = "darkblue", "7DMA" = "red")) +
+  
+      # Changepoints 
+      # geom_vline(aes(xintercept=as.numeric(cz_cp1), color="Changepoint1")) +
+      # geom_vline(aes(xintercept=as.numeric(cz_cp2), color="Changepoint2")) +
+      geom_vline(xintercept=as.numeric(changepoints[1]), color="blue", linetype=4) +
+      geom_vline(xintercept=as.numeric(changepoints[2]), color="blue", linetype=4) +
+      # 
+          
+      # Labels 
+      ylab('Reported Cases') +
+      xlab('Date') +
+      ggtitle(paste(ccountry, " Reported Cases"))
+
+    ggsave( paste0(ccountry, "_cases.png"),dpi = 300)
+
+    
+  }
+  
+  # Specify Model Parameters & Data
+  n_pop <- ecdc[ecdc$geoId == ccountry, popData2020][1]
+  new_cases <- ecdc_subset$cases_ma
+  n_obs <- length(new_cases)
+  new_removals <- c(rep(0, avg_infectious_period), new_cases)[0:n_obs]
+  model_data <- list("n_obs"=n_obs, "n_pop" = n_pop, "new_cases"=new_cases, "new_removals"=new_removals)
+  # return(list(model_data, ecdc_subset))
+  
+  return(model_data)
+}
+
+
+```
+
+
+
+```{r, data_config}
+
+
+country_codes <- c("CZ", "DK", "LU")
+
+# Czechia
+my_changepoints <- data.frame(
+  "CZ" = c(
+  as.Date("2020-12-01", format = "%Y-%m-%d" ), # 90
+  as.Date("2021-02-01", format = "%Y-%m-%d" )  # 155
+),
+  "DK" = c(
+  as.Date("2020-10-15", format = "%Y-%m-%d" ), 
+  as.Date("2021-02-15", format = "%Y-%m-%d" ) 
+),
+  "LU" = c(
+  as.Date("2020-09-20", format = "%Y-%m-%d" ), 
+  as.Date("2021-01-15", format = "%Y-%m-%d" ) 
+)
+)
+
+
+date_to_cp <- function(mydate) {
+  as.numeric(mydate - as.Date("2020-09-01", "%Y-%m-%d"))
+}
+
+cz_cp1 <- date_to_cp(my_changepoints$CZ[1])
+cz_cp2 <- date_to_cp(my_changepoints$CZ[2])
+
+dk_cp1 <- date_to_cp(my_changepoints$DK[1])
+dk_cp2 <- date_to_cp(my_changepoints$DK[2])
+
+lu_cp1 <- date_to_cp(my_changepoints$LU[1])
+lu_cp2 <- date_to_cp(my_changepoints$LU[2])
+
+cz_data <- prepare_country_data("CZ", my_changepoints$CZ)
+# cz_data
+
+
+# Denmark 
+
+dk_data <- prepare_country_data("DK", my_changepoints$DK)
+# dk_data
+
+
+lu_data <- prepare_country_data("LU", my_changepoints$LU)
+# lu_data
+
+
+
+```
+
+
+The following chain binomial model belongs to the broader class of stochastic discrete-time SIR models.
+
+$$\begin{array}{rcl}
+new\_cases_{t} & \sim & Bin \left (S_{t-1}, 1-e^{-\beta \frac{I_{t-1}}{N}} \right )\\
+S_{t} & = & S_{t-1} - new\_cases_{t} \\
+I_{t} & = & I_{t-1} + new\_cases_{t} - removals_t
+\end{array}$$
+
+where $$\beta$$ is the probability that a susceptible individual has infectious contact with an infected individual and  becomes infected.
+
+Note that, if we write $$q = e^{\frac{-\beta}{N}}$$ and assume that infectious period is fixed and constant, we have a Reed-Frost model. A susceptible at time t-1 can remain susceptible by avoiding being infected by all infectives I_{t-1}, and the probability of avoiding being infected by one infective is q.
+
+```{r no_change, echo=TRUE}
+
+# Fit Chain Binomial with no change points
+
+rfcb_nocp <- function(my_data){
+  
+  CBmodel <- function(){
+    S0 <- n_pop - 1
+    I0 <- 1
+    
+    p[1] <- 1-exp(-(beta*I0/n_pop))
+    new_cases[1] ~ dbin(p[1],S0)
+    S[1] <- S0 - new_cases[1]
+    I[1] <- I0 + new_cases[1] - new_removals[1]
+    
+    for (t in 2:n_obs){
+      p[t] <- 1-exp(-(beta*I[t-1]/n_pop))
+      new_cases[t] ~ dbin(p[t],S[t-1])
+      S[t] <- S[t-1]- new_cases[t]
+      I[t] <- I[t-1] + new_cases[t] - new_removals[t]
+    }
+    
+    # prior   
+    beta ~ dlnorm(0,5)        
+  }
+  
+  filename<- file.path(getwd(), "CBmodel.bug")
+  write.model(CBmodel, filename)
+  
+  n_chains=3
+  n_burnin=500
+  n_iter=25000
+  n_thin=50
+  set.seed(1234)
+  
+  # Specify parameters to monitor:
+  params <- c("beta")
+  
+  # Generate initial values for the parameters:
+  inits = function(){
+    list(beta=runif(1,0.05,0.07))
+  }
+  
+  time.start_mcmc <- Sys.time()
+  
+  # Run MCMC in openBUGS
+  mcmc_fit <- openbugs(
+      my_data, 
+      inits, 
+      model.file = filename, 
+      parameters.to.save = params, 
+      # program="OpenBUGS",
+      n.chains = n_chains, 
+      n.iter = n_iter, 
+      n.burnin = n_burnin, 
+      n.thin = n_thin
+  )
+  
+  time.end_mcmc <- Sys.time()
+  duration_mcmc <- time.end_mcmc - time.start_mcmc
+
+  mcmc_fit
+}
+
+```
+
+
+```{r one_changepoint,  echo=FALSE}
+
+# 1 changepoint 
+rfcb_1cp <- function(my_data, cp1){
+  my_data$k <- cp1
+  CBmodel2 <- function(){
+    S0 <- n_pop - 1
+    I0 <- 1
+    # k <- cp1
+  
+    
+    p[1] <- 1-exp(-(beta[1]*I0/n_pop))
+    new_cases[1] ~ dbin(p[1], S0)
+    S[1] <- S0 - new_cases[1]
+    I[1] <- I0 + new_cases[1] - new_removals[1]
+    
+    for (t in 2:n_obs){
+  
+      # select beta vector depending on change point     
+      param[t] <- 1 + step(k - t - 1) 
+      p[t] <- 1 - exp(-(beta[param[t]]*I[t-1]/n_pop))
+      new_cases[t] ~ dbin(p[t],S[t-1])
+      S[t] <- S[t-1]- new_cases[t]
+      I[t] <- I[t-1] + new_cases[t] - new_removals[t]
+    }
+    
+    # prior   
+    for (j in 1:2){
+      beta[j] ~ dlnorm(0, 5)        
+    }
+  }
+  
+  paste(getwd())
+  
+  filename2 <- file.path(getwd(), "CBmodel2.bug")
+  write.model(CBmodel2, filename2)
+  
+  n_chains=3
+  n_burnin=500
+  n_iter=25000
+  n_thin=50
+  set.seed(1234)
+  
+  # Specify parameters to monitor:
+  params <- c("beta")
+  
+  # Generate initial values for the parameters:
+  inits = function(){
+    list(beta=c(runif(1,0.05,0.07), runif(1,0.15,0.17)))
+  }
+  
+  time.start_mcmc <- Sys.time()
+  #this function will call bugs through R, the user must set the correct file, where the bugs #executable is inside
+  #If you choose debug == TRUE the Winbugs will remain open, even after the sampling is finished
+  #There is a possible error Error in file(con, "wb") : cannot open the connection which can be #ignored
+  
+  mcmc_fit2 <- openbugs(
+      my_data, 
+      inits, 
+      model.file = filename2, 
+      parameters.to.save = params, 
+      # program="OpenBUGS",
+      n.chains = n_chains, 
+      n.iter = n_iter, 
+      n.burnin = n_burnin, 
+      n.thin = n_thin
+  )
+  
+  time.end_mcmc <- Sys.time()
+  
+  duration_mcmc <- time.end_mcmc - time.start_mcmc
+
+  mcmc_fit2 
+}
+
+```
+
+
+# BUGS step()
+# y <- step(x)
+# y = 0 if step(x) < 0
+# y = 1 if x >= 0
+
+```{r many_changepoint,  echo=FALSE}
+
+rfcb_2cp <- function(my_data, cp1, cp2){
+  
+  my_data$k <- cp1
+  my_data$k2 <- cp2
+  
+  CBmodel3 <- function(){
+    S0 <- n_pop - 1
+    I0 <- 1
+  
+    # k <- cp1
+    # k2 <- cp2
+    
+    p[1] <- 1-exp(-(beta[1]*I0/n_pop))
+    new_cases[1] ~ dbin(p[1], S0)
+    S[1] <- S0 - new_cases[1]
+    I[1] <- I0 + new_cases[1] - new_removals[1]
+    
+    for (t in 2:n_obs){
+      
+      param[t] <- 1 + step(t - k - 1) + step(t - k2 -1)
+      p[t] <- 1 - exp(-(beta[param[t]]*I[t-1]/n_pop))
+      new_cases[t] ~ dbin(p[t],S[t-1])
+      S[t] <- S[t-1]- new_cases[t]
+      I[t] <- I[t-1] + new_cases[t] - new_removals[t]
+    }
+    
+    # prior   
+    for (j in 1:3){
+      beta[j] ~ dlnorm(0, 5)        
+    }
+  }
+  
+  paste(getwd())
+  
+  filename3 <- file.path(getwd(), "CBmodel3.bug")
+  write.model(CBmodel3, filename3)
+  
+  n_chains=5
+  n_burnin=2000
+  n_iter=25000
+  n_thin=50
+  set.seed(1234)
+  
+  # Specify parameters to monitor:
+  params <- c("beta")
+  
+  # Generate initial values for the parameters:
+  inits = function(){
+    list(beta=c(runif(1,0.05,0.07), runif(1,0.05,0.07), runif(1,0.05,0.07)))
+  }
+  
+  time.start_mcmc <- Sys.time()
+  #this function will call bugs through R, the user must set the correct file, where the bugs #executable is inside
+  #If you choose debug == TRUE the Winbugs will remain open, even after the sampling is finished
+  #There is a possible error Error in file(con, "wb") : cannot open the connection which can be #ignored
+  
+  mcmc_fit3 <- openbugs(
+      my_data, 
+      inits, 
+      model.file = filename3, 
+      parameters.to.save = params, 
+      # program="OpenBUGS",
+      n.chains = n_chains, 
+      n.iter = n_iter, 
+      n.burnin = n_burnin, 
+      n.thin = n_thin
+  )
+  
+  time.end_mcmc <- Sys.time()
+  
+  duration_mcmc <- time.end_mcmc - time.start_mcmc
+
+  mcmc_fit3
+}
+
+```
+
+
+```{r learn_many_changepoint,  echo=FALSE}
+
+rfcb_2cp_learn <- function(my_data, cp1, cp2, cp_margin=30){
+  
+  # Express confidence in change point via the margin parameter
+  my_data$cp1_lb <- cp1 - cp_margin
+  my_data$cp1_ub <- cp1 + cp_margin
+
+  my_data$cp2_lb <- cp2 - cp_margin
+  my_data$cp2_ub <- cp2 + cp_margin
+  
+  
+  CBmodel4 <- function(){
+    S0 <- n_pop - 1
+    I0 <- 1
+  
+    p[1] <- 1-exp(-(beta[1]*I0/n_pop))
+    new_cases[1] ~ dbin(p[1], S0)
+    S[1] <- S0 - new_cases[1]
+    I[1] <- I0 + new_cases[1] - new_removals[1]
+    
+    for (t in 2:n_obs){
+      
+      param[t] <- 1 + step(t - k - 1) + step(t - k2 - 1)
+      p[t] <- 1 - exp(-(beta[param[t]]*I[t-1]/n_pop))
+      new_cases[t] ~ dbin(p[t],S[t-1])
+      S[t] <- S[t-1]- new_cases[t]
+      I[t] <- I[t-1] + new_cases[t] - new_removals[t]
+    }
+    
+    # prior   
+    
+    # Ro parameteres
+    for (j in 1:3){
+      beta[j] ~ dlnorm(0, 5)        
+    }
+    
+  
+    k ~ dunif(cp1_lb,cp1_ub)
+    k2 ~ dunif(cp2_lb,cp2_ub)
+  
+    # prior on number of change points
+    # n_points ~ dunif(3,8)
+  
+    # changepoint priors
+    # for (k in 1:n_points){
+    #   change_points[k] ~ dunif((k-1)*90, (k-1)*90+20)
+    # }
+  
+  }
+  
+  paste(getwd())
+  
+  filename4 <- file.path(getwd(), "CBmodel4.bug")
+  paste(filename4)
+  write.model(CBmodel4, filename4)
+  
+  n_chains=5
+  n_burnin=5000
+  n_iter=100000
+  n_thin=50
+  set.seed(1234)
+  
+  # Specify parameters to monitor:
+  params <- c("beta", "k", "k2")
+  
+  # Generate initial values for the parameters:
+  inits = function(){
+    list(beta=c(runif(1,0.05,0.07), runif(1,0.05,0.07), runif(1,0.05,0.07)), k=runif(1,my_data$cp1_lb,my_data$cp1_ub), k2=runif(1,my_data$cp2_lb,my_data$cp2_ub))
+  }
+  
+  time.start_mcmc <- Sys.time()
+  #this function will call bugs through R, the user must set the correct file, where the bugs #executable is inside
+  #If you choose debug == TRUE the Winbugs will remain open, even after the sampling is finished
+  #There is a possible error Error in file(con, "wb") : cannot open the connection which can be #ignored
+  
+  mcmc_fit4 <- openbugs(
+      my_data, 
+      inits, 
+      model.file = filename4, 
+      parameters.to.save = params, 
+      # program="OpenBUGS",
+      n.chains = n_chains, 
+      n.iter = n_iter, 
+      n.burnin = n_burnin, 
+      n.thin = n_thin
+  )
+  
+  time.end_mcmc <- Sys.time()
+  
+  duration_mcmc <- time.end_mcmc - time.start_mcmc
+
+ mcmc_fit4 
+}
+
+```
+
+```{r, fit-models}
+
+fit_all <- function(my_data, cp1, cp2, country){
+  
+  # Fit all the Models
+  print(country)
+  
+  print("Model 1")
+  mcmc_fit <- rfcb_nocp(my_data)
+  print(mcmc_fit, digits = 3)
+  diagnostic_plots(mcmc_fit, country, model_num="1")
+
+  print("Model 2")
+  mcmc_fit2 <- rfcb_1cp(my_data,cp1)
+  print(mcmc_fit2, digits = 3)
+    diagnostic_plots(mcmc_fit2, country, model_num="2")
+
+  print("Model 3")
+  mcmc_fit3 <- rfcb_2cp(my_data, cp1, cp2)
+  print(mcmc_fit3, digits = 3)
+    diagnostic_plots(mcmc_fit3, country, model_num="3")
+
+  print("Model 4")
+  mcmc_fit4 <- rfcb_2cp_learn(my_data, cp1, cp2, cp_margin=30)
+  print(mcmc_fit4, digits = 3)
+  diagnostic_plots(mcmc_fit4, country, model_num="4")
+
+  return(c(mcmc_fit, mcmc_fit2, mcmc_fit3, mcmc_fit4))
+}
+
+```
+
+
+```{r diagnostic-plots}
+
+#### DIAGNOSTICS
+# # Produce html file with trace, density, and autocorrelation plots. The files are displayed in the default internet browser
+# mcmcplot(mcmc_results4)
+# diagnostic_plots(mcmc_fit4, country="country", model_num="lala")
+diagnostic_plots <- function(mcmc_obj, country="country", model_num="lala"){
+  plot(mcmc_obj, display.parallel = TRUE) # gives a summary plot of parameters and credible intervals
+  
+  mcmc_obj_list <- as.mcmc.list(mcmc_obj)
+  
+  
+  fname <- file.path(getwd(), paste0(country, "_model", model_num, "_ac"))
+  png(fname)
+  autocorr.plot(mcmc_obj_list)
+  dev.off()
+
+  fname <- file.path(getwd(), paste0(country, "_model", model_num, "_density"))
+  png(fname)
+  denplot(mcmc_obj_list, parms = c("deviance","beta", "k", "k2"))
+  dev.off()
+
+  fname <- file.path(getwd(), paste0(country, "_model", model_num, "_trace"))
+  png(fname)
+  traplot(mcmc_obj_list, parms = c("deviance","beta", "k", "k2"))
+  dev.off()
+
+}
+```
+
+
+```{r, run-all}
+
+# RUN EVERYTHING
+lu_models <- fit_all(lu_data, lu_cp1, lu_cp2, "LU")
+cz_models <- fit_all(cz_data, cz_cp1, cz_cp2, "CZ")
+dk_models <- fit_all(dk_data, dk_cp1, dk_cp2, "DK")
+
+save.image(file='learn_many_changepoint.RData')
+```
