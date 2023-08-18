@@ -1,0 +1,202 @@
+---
+title: "Epidemic GSE Exercise"
+author: "Andre Ehrlich"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(Rmpfr)
+```
+
+## Standard SIR Epidemic: Probability of final size
+Compute following probabilities: 
+$$P_0^n,P_1^n,P_2^n,$$
+
+Given following recursive formula:
+$$ \sum_{k=0}^{n}  \frac{{{n-k}\choose{l-k}}P_k^n }{ [\phi(\lambda(n-l)/n)]^{k+m} } = {n \choose l}, 0 \le l \le n  $$
+
+```{r phi}
+# phi(θ) = E[exp(-θ*I)]
+# Phi: laplace transform of r.v. I, depends on distribution
+# we are given several to try for this exercise.
+
+# scenario a: I ~ Exp(1) (mean = 1)
+phi_mgf_exp <- function(t, lambda=1){
+  lambda/(lambda+t)
+}
+
+# scenario b: I ~ Γ(2,2) (mean = 1)
+phi_mgf_gamma <- function(t, alpha=2, beta=2){
+  (beta / (t + beta)) ^ alpha
+}
+
+# scenario c: I ~ Constant = 1   (Reed-Frost model)
+phi_mgf_degenerate <- function(t,a=1)  exp(-a*t)
+
+
+phi_func <- function(I_dist, t){
+  if (I_dist == "exp"){
+    phi_mgf_exp(t=t)
+  } else if (I_dist == "gamma") {
+    phi_mgf_gamma(t)
+  } else if (I_dist == "degenerate") {
+    phi_mgf_degenerate(t)
+  }
+}
+```
+
+
+```{r, calc}
+# Solve triangular system of equations recursively 
+# AP = 1 # A is (n+1)x(n+1) # P is (n+1) * 1 # 1 is (n+1) * 1 of 1's 
+calculate_final_size_probabilities <- function(I, lambda, n, m){
+  # Compute A 
+  A = matrix(rep(0, (n+1)*(n+1) ), nrow=n+1, ncol=n+1)
+  for (l in seq(0,n)){
+    for (k in seq(0,l)){
+      A[l+1,k+1] = choose(n-k, l-k) / ( 
+        choose(n,l) * phi_func(I_dist=I, t=lambda*(n-l)/n)^(k+m) 
+      )
+    }
+  }
+  # Solve Triangular system of equations with forward substitution. 
+  # AP = 1
+  # vector of ones 
+  b = rep(1,n+1)
+  
+  # Final Size Probabilities
+  # Forward Substitution solution to triangular system of equations. 
+  x <- backsolve(A, b, upper.tri=FALSE)
+  # x = matrix(0,nrow=n+1, ncol=1)
+  # for (i in seq(1,n+1)){
+  #   x[i] = b[i]
+  #   # print(paste("i", i))
+  #   if (i > 1){
+  #     for (j in seq(1,i-1)){
+  #       # print(paste("j",j))    
+  #       x[i] = x[i] - A[i,j]*x[j]
+  #     }
+  #   }
+  #   x[i] =  x[i] / A[i,i]
+  # }
+
+  x
+}
+
+    
+### Traverse Vectors of Parameters
+results = data.frame()
+m = 1
+for (I in c("exp", "gamma", "degenerate")) {
+  for (lambda in c(0.5,1,2,5)) {
+    fname <-  file.path(getwd(), paste0("I",I,"-lambda",lambda,".png"))
+    print(fname)
+    png(fname)
+    par(mfrow=c(2,2))
+    for ( n in c(10,50,100,200) ) {
+      x = calculate_final_size_probabilities(I, lambda, n, m)
+      cres = c(I, lambda, n, m, x[1],x[2],x[3])
+      results = rbind(results, cres)
+      plot(x, main=paste("I ~", I, "lambda=",lambda, " n=",n), xlab="Final Size k", ylab="Probability")
+    }
+    dev.off()
+  }
+}
+
+colnames(results) <- c("I", "lambda", "n","m", "P(k=0)", "P(k=1)", "P(k=2)")
+results
+# png("result_table_exp.png")
+subset(results, results$I == "degenerate") %>% gt() #%>% gtsave(filename="result_table_exp.png")
+# dev.off()
+```
+
+
+
+
+
+```{r, calc_rmpfr}
+# Solve triangular system of equations recursively 
+# AP = 1 # A is (n+1)x(n+1) # P is (n+1) * 1 # 1 is (n+1) * 1 of 1's 
+calculate_final_size_probabilities_mpfr <- function(I, lambda, n, m){
+  # I = "exp"
+  # lambda = 1
+  # n = 10
+  # m = 1
+  # Compute A 
+  A = mpfrArray(0, precBits = 400, dim = c(n+1, n+1))
+  A
+  # A = matrix(rep(0, (n+1)*(n+1) ), nrow=n+1, ncol=n+1)
+  for (l in seq(0,n)){
+    for (k in seq(0,l)){
+      A[l+1,k+1] = choose(n-k, l-k) / ( 
+        choose(n,l) * phi_func(I_dist=I, t=lambda*(n-l)/n)^(k+m) 
+      )
+    }
+  }
+  A
+  # Solve Triangular system of equations with forward substitution. 
+  # AP = 1
+  # vector of ones 
+  b =  mpfrArray(1, precBits=400, dim = c(1, n+1))
+  b
+  # Final Size Probabilities
+  # Forward Substitution solution to triangular system of equations. 
+  # x <- backsolve(A, b, upper.tri=FALSE)
+  # x = matrix(0,nrow=n+1, ncol=1)
+  x = mpfrArray(0, precBits = 400, dim = c(n+1,1))
+  x
+  for (i in seq(1,n+1)){
+    x[i] = b[i]
+    # print(paste("i", i))
+    if (i > 1){
+      for (j in seq(1,i-1)){
+        # print(paste("j",j))
+        x[i] = x[i] - A[i,j]*x[j]
+      }
+    }
+    x[i] =  x[i] / A[i,i]
+  }
+
+  x
+}
+
+    
+### Traverse Vectors of Parameters
+results = data.frame()
+m = 1
+for (I in c("exp")){ #}, "gamma", "degenerate")) {
+  print(paste("I", I))
+  for (lambda in c(0.5)){#},1,2,5)) {
+    print(paste("lambda", lambda))
+    
+    
+    fname <-  file.path(getwd(), paste0("I",I,"-lambda",lambda,"_mpfr.png"))
+    png(fname)
+    par(mfrow=c(2,2))
+    # for ( n in c(10,50,100,200) ) {
+    for ( n in c(200) ) {
+
+      print(paste("n", n))
+      x = calculate_final_size_probabilities_mpfr(I, lambda, n, m)
+      print("HAHAHAHA")
+      
+      # cres = c(I, lambda, n, m, x[1,1],x[2,1],x[3,1])
+      # cres
+      # x[,1]
+      
+      # results = rbind(results, cres)
+      plot(seq(1,length(x[,1])), x[,1], main=paste("I ~", I, "lambda=",lambda, " n=",n), xlab="Final Size k", ylab="Probability")
+    }
+    dev.off()
+  }
+}
+
+colnames(results) <- c("I", "lambda", "n","m", "P(k=0)", "P(k=1)", "P(k=2)")
+results
+# png("result_table_exp.png")
+subset(results, results$I == "exp") %>% gt() %>% gtsave(filename="result_table_exp.png")
+# dev.off()
+```
